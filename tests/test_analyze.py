@@ -14,6 +14,7 @@ from app.main import app
 def use_mock_transcription_provider(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AI_TRANSCRIPTION_PROVIDER", "mock")
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("DEEPGRAM_API_KEY", raising=False)
     monkeypatch.delenv("AI_MOCK_TRANSCRIPTION_TEXT", raising=False)
 
 
@@ -389,6 +390,134 @@ def test_analyze_returns_failed_status_when_openai_key_is_missing(
 
     assert body["status"] == "FAILED"
     assert body["failureReason"] == "openai_api_key_missing"
+
+
+def test_analyze_returns_failed_status_when_deepgram_key_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = TestClient(app)
+    audio_bytes = b"fake audio bytes"
+    encoded_audio = base64.b64encode(audio_bytes).decode("ascii")
+    monkeypatch.setenv("AI_TRANSCRIPTION_PROVIDER", "deepgram")
+    monkeypatch.delenv("DEEPGRAM_API_KEY", raising=False)
+
+    response = client.post(
+        "/analyze",
+        json={
+            "evidenceRecordId": "evidence-id",
+            "alertSessionId": "session-id",
+            "evidenceType": "AUDIO",
+            "mimeType": "audio/wav",
+            "size": len(audio_bytes),
+            "contentHash": sha256(audio_bytes).hexdigest(),
+            "storageReference": f"data:audio/wav;base64,{encoded_audio}",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+
+    assert body["status"] == "FAILED"
+    assert body["failureReason"] == "deepgram_api_key_missing"
+
+
+def test_analyze_transcribes_deepgram_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = TestClient(app)
+    audio_bytes = b"fake audio bytes"
+    encoded_audio = base64.b64encode(audio_bytes).decode("ascii")
+    captured_request = {}
+    monkeypatch.setenv("AI_TRANSCRIPTION_PROVIDER", "deepgram")
+    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test-key")
+
+    class FakeDeepgramResponse:
+        status_code = 200
+
+        def json(self) -> dict:
+            return {
+                "metadata": {
+                    "request_id": "dg-request-id",
+                },
+                "results": {
+                    "channels": [
+                        {
+                            "detected_language": "pt-BR",
+                            "alternatives": [
+                                {
+                                    "transcript": "Eu vou te matar agora.",
+                                    "words": [
+                                        {
+                                            "word": "eu",
+                                            "start": 0.0,
+                                            "end": 0.1,
+                                            "confidence": 0.94,
+                                        },
+                                        {
+                                            "word": "agora",
+                                            "start": 0.8,
+                                            "end": 1.2,
+                                            "confidence": 0.9,
+                                        },
+                                    ],
+                                }
+                            ],
+                        }
+                    ]
+                },
+            }
+
+    def fake_post(url: str, **kwargs):
+        captured_request["url"] = url
+        captured_request.update(kwargs)
+        return FakeDeepgramResponse()
+
+    monkeypatch.setattr("app.services.transcription_service.httpx.post", fake_post)
+
+    response = client.post(
+        "/analyze",
+        json={
+            "evidenceRecordId": "evidence-id",
+            "alertSessionId": "session-id",
+            "evidenceType": "AUDIO",
+            "mimeType": "audio/wav",
+            "size": len(audio_bytes),
+            "contentHash": sha256(audio_bytes).hexdigest(),
+            "storageReference": f"data:audio/wav;base64,{encoded_audio}",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+
+    assert "model=nova-2" in captured_request["url"]
+    assert "language=pt-BR" in captured_request["url"]
+    assert captured_request["headers"]["Authorization"] == "Token dg-test-key"
+    assert captured_request["headers"]["Content-Type"] == "audio/wav"
+    assert captured_request["content"] == audio_bytes
+    assert body["status"] == "COMPLETED"
+    assert body["riskLevel"] == "CRITICAL"
+    assert body["shouldEscalate"] is True
+    assert body["providerMetadata"] == {
+        "provider": "deepgram",
+        "model": "nova-2",
+        "modelVersion": "nova-2",
+    }
+    assert body["transcription"] == {
+        "text": "Eu vou te matar agora.",
+        "language": "pt-BR",
+        "segments": [
+            {
+                "startMs": 0,
+                "endMs": 1200,
+                "text": "Eu vou te matar agora.",
+                "confidence": 0.92,
+            }
+        ],
+    }
+    assert "transcription_model:nova-2" in body["detectedSignals"]
+    assert "transcription_request_id:dg-request-id" in body["detectedSignals"]
+    assert "threat_signal:concrete_lethal_threat" in body["detectedSignals"]
 
 
 def _build_wav(samples: list[int], frame_rate: int = 1000) -> bytes:

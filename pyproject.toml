@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115.0",
+    "httpx>=0.28.0",
     "openai>=2.38.0",
     "python-dotenv>=1.2.2",
     "uvicorn[standard]>=0.30.0",
@@ -16,7 +17,6 @@ ai-service = "app.cli:main"
 
 [dependency-groups]
 dev = [
-    "httpx>=0.28.0",
     "pytest>=8.0.0",
 ]
 

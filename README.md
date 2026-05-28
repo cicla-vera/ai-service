@@ -26,6 +26,11 @@ OPENAI_API_KEY=
 OPENAI_TRANSCRIPTION_MODEL=gpt-4o-mini-transcribe
 OPENAI_TRANSCRIPTION_LANGUAGE=pt
 OPENAI_TRANSCRIPTION_PROMPT=
+DEEPGRAM_API_KEY=
+DEEPGRAM_TRANSCRIPTION_MODEL=nova-2
+DEEPGRAM_TRANSCRIPTION_LANGUAGE=pt-BR
+DEEPGRAM_TRANSCRIPTION_BASE_URL=https://api.deepgram.com/v1/listen
+DEEPGRAM_TRANSCRIPTION_TIMEOUT_SECONDS=30
 AI_SERVICE_MAX_AUDIO_SOURCE_BYTES=26214400
 AI_SERVICE_AUDIO_FETCH_TIMEOUT_SECONDS=10
 AI_SERVICE_ALLOWED_AUDIO_HOSTS=
@@ -42,6 +47,11 @@ AI_ACOUSTIC_CLIPPING_RATIO_THRESHOLD=0.03
 through the official Python SDK. The default model is
 `gpt-4o-mini-transcribe`; use `gpt-4o-transcribe` if accuracy is more important
 than cost/latency for a specific environment.
+
+`AI_TRANSCRIPTION_PROVIDER=deepgram` uses Deepgram's pre-recorded `/v1/listen`
+endpoint. The default model is `nova-2` with `pt-BR` because that path has
+documented Portuguese support; set `DEEPGRAM_TRANSCRIPTION_MODEL=nova-3` when
+you want to evaluate the newer model for a specific environment.
 
 `AI_MOCK_TRANSCRIPTION_TEXT` is optional and exists for local/dev tests that
 need to simulate a specific transcript without spending provider credits.
@@ -100,10 +110,11 @@ Expected response:
 
 The `/analyze` endpoint defines the v1 contract for Vera audio evidence
 analysis. By default it uses deterministic mock transcription for integration
-tests. When `AI_TRANSCRIPTION_PROVIDER=openai` and `OPENAI_API_KEY` are set, it
-resolves `storageReference`, verifies hash/size, and sends the audio to the
-configured speech-to-text model. It then runs a deterministic acoustic detector
-and risk aggregator before returning the final classification.
+tests. When `AI_TRANSCRIPTION_PROVIDER=openai` or
+`AI_TRANSCRIPTION_PROVIDER=deepgram` is configured with the corresponding API
+key, it resolves `storageReference`, verifies hash/size, and sends the audio to
+the configured speech-to-text model. It then runs a deterministic acoustic
+detector and risk aggregator before returning the final classification.
 
 Version `audio-evidence-v1` only accepts `AUDIO` evidence with an `audio/*`
 MIME type. Later provider work can improve transcription, acoustic events,
