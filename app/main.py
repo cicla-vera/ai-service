@@ -1,7 +1,10 @@
 from fastapi import FastAPI
+from dotenv import load_dotenv
 
 from app.api.routes.analyze import router as analyze_router
 from app.api.routes.health import router as health_router
+
+load_dotenv()
 
 
 def create_app() -> FastAPI:

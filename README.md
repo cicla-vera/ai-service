@@ -11,7 +11,43 @@ FastAPI microsservice used by the Vera safety layer to support evidence analysis
 
 ```bash
 uv sync
+cp .env.example .env
 ```
+
+## Environment
+
+The service defaults to deterministic mock transcription. Set these variables
+when testing a real provider:
+
+```env
+AI_TRANSCRIPTION_PROVIDER=mock
+OPENAI_API_KEY=
+OPENAI_TRANSCRIPTION_MODEL=gpt-4o-mini-transcribe
+OPENAI_TRANSCRIPTION_LANGUAGE=pt
+OPENAI_TRANSCRIPTION_PROMPT=
+AI_SERVICE_MAX_AUDIO_SOURCE_BYTES=26214400
+AI_SERVICE_AUDIO_FETCH_TIMEOUT_SECONDS=10
+AI_SERVICE_ALLOWED_AUDIO_HOSTS=
+AI_SERVICE_ALLOW_INSECURE_AUDIO_REFERENCES=false
+AI_SERVICE_ALLOW_FILE_REFERENCES=false
+```
+
+`AI_TRANSCRIPTION_PROVIDER=openai` uses OpenAI's audio transcription endpoint
+through the official Python SDK. The default model is
+`gpt-4o-mini-transcribe`; use `gpt-4o-transcribe` if accuracy is more important
+than cost/latency for a specific environment.
+
+The current `/analyze` JSON contract accepts `storageReference` in three forms:
+
+- `data:audio/...;base64,...` for small local tests.
+- `https://...` signed URLs from the backend/storage provider.
+- `file://...` only when `AI_SERVICE_ALLOW_FILE_REFERENCES=true` for local dev.
+
+Every resolved audio source is checked against `size` and the backend-provided
+SHA-256 `contentHash` before transcription. Plain `http://` references are
+blocked unless `AI_SERVICE_ALLOW_INSECURE_AUDIO_REFERENCES=true`; set
+`AI_SERVICE_ALLOWED_AUDIO_HOSTS` to a comma-separated host allowlist in shared
+or production-like environments.
 
 ## Run locally
 
@@ -38,10 +74,12 @@ Expected response:
 
 ## Audio evidence analysis contract
 
-The first `/analyze` endpoint defines the v1 contract for Vera audio evidence
-analysis. The implementation is still intentionally mocked: it validates the
-request shape used by the backend and returns a stable response for integration
-tests. It does not run a real model and never infers critical escalation.
+The `/analyze` endpoint defines the v1 contract for Vera audio evidence
+analysis. By default it uses deterministic mock transcription for integration
+tests. When `AI_TRANSCRIPTION_PROVIDER=openai` and `OPENAI_API_KEY` are set, it
+resolves `storageReference`, verifies hash/size, and sends the audio to the
+configured speech-to-text model. Threat and acoustic risk classification are
+still future work, so this endpoint never infers critical escalation yet.
 
 Version `audio-evidence-v1` only accepts `AUDIO` evidence with an `audio/*`
 MIME type. Later provider work will fill transcription, acoustic events, threat
@@ -58,7 +96,6 @@ curl -X POST http://localhost:8000/analyze \
     "mimeType": "audio/wav",
     "size": 512,
     "contentHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    "storageReference": "backend-owned-reference",
     "captureContext": {
       "captureStartedAt": "2026-05-28T10:00:00Z",
       "captureEndedAt": "2026-05-28T10:00:12Z",
@@ -92,7 +129,8 @@ Expected response:
   "detectedSignals": [
     "mock_analysis",
     "metadata_received",
-    "evidence_type:AUDIO"
+    "evidence_type:AUDIO",
+    "transcription_skipped:no_audio_source"
   ],
   "shouldEscalate": false,
   "recommendedAction": "NONE",
@@ -114,12 +152,12 @@ Expected response:
   "threatMatches": [],
   "providerMetadata": {
     "provider": "mock",
-    "model": "metadata-only",
-    "modelVersion": "audio-evidence-v1"
+    "model": "mock-transcription",
+    "modelVersion": "mock-transcription"
   },
-  "processingStartedAt": "2026-01-01T00:00:00Z",
-  "processingFinishedAt": "2026-01-01T00:00:01Z",
-  "latencyMs": 1000,
+  "processingStartedAt": "2026-05-28T10:00:13.000000Z",
+  "processingFinishedAt": "2026-05-28T10:00:13.001000Z",
+  "latencyMs": 1,
   "failureReason": null
 }
 ```

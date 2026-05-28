@@ -10,33 +10,63 @@ from app.schemas.analyze import (
     RecommendedAction,
     RiskLevel,
 )
+from app.services.audio_source import AudioSourceError, resolve_audio_source
+from app.services.transcription_service import (
+    TranscriptionError,
+    get_transcription_provider,
+)
 
 ANALYSIS_VERSION = "audio-evidence-v1"
-MOCK_PROCESSING_STARTED_AT = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
-MOCK_PROCESSING_FINISHED_AT = datetime(2026, 1, 1, 0, 0, 1, tzinfo=UTC)
 
 
 class AnalyzeService:
     def analyze(self, payload: AnalyzeEvidenceRequest) -> AnalyzeEvidenceResponse:
+        processing_started_at = datetime.now(UTC)
+
+        try:
+            source = resolve_audio_source(payload)
+            transcription_provider = get_transcription_provider()
+            transcription_result = transcription_provider.transcribe(source, payload)
+        except AudioSourceError as error:
+            return self._build_failed_response(
+                payload=payload,
+                processing_started_at=processing_started_at,
+                failure_reason=error.code,
+            )
+        except TranscriptionError as error:
+            return self._build_failed_response(
+                payload=payload,
+                processing_started_at=processing_started_at,
+                failure_reason=error.code,
+            )
+
+        processing_finished_at = datetime.now(UTC)
+        detected_signals = [
+            "metadata_received",
+            f"evidence_type:{payload.evidence_type}",
+            *transcription_result.detected_signals,
+        ]
+
+        if transcription_result.transcription is None:
+            detected_signals.insert(0, "mock_analysis")
+
+        summary = self._get_summary(transcription_result.transcription is not None)
+
         return AnalyzeEvidenceResponse(
-            analysis_id=f"mock-analysis-{payload.evidence_record_id}",
-            analysis_version=ANALYSIS_VERSION,
-            status=AnalysisStatus.COMPLETED,
-            risk_level=RiskLevel.LOW,
-            confidence=0.12,
-            summary=(
-                "Mock analysis completed. No real model was executed and no "
-                "critical escalation was inferred from metadata-only input."
+            analysis_id=(
+                f"{transcription_result.provider_metadata.provider}-analysis-"
+                f"{payload.evidence_record_id}"
             ),
-            detected_signals=[
-                "mock_analysis",
-                "metadata_received",
-                f"evidence_type:{payload.evidence_type}",
-            ],
+            analysis_version=ANALYSIS_VERSION,
+            status=transcription_result.status,
+            risk_level=RiskLevel.LOW,
+            confidence=transcription_result.confidence,
+            summary=summary,
+            detected_signals=detected_signals,
             should_escalate=False,
             recommended_action=RecommendedAction.NONE,
             evidence_window=self._get_evidence_window(payload),
-            transcription=None,
+            transcription=transcription_result.transcription,
             acoustic_events=[
                 AcousticEvent(
                     label="mock_metadata_only_analysis",
@@ -47,15 +77,14 @@ class AnalyzeService:
                 )
             ],
             threat_matches=[],
-            provider_metadata=AnalysisProviderMetadata(
-                provider="mock",
-                model="metadata-only",
-                model_version=ANALYSIS_VERSION,
+            provider_metadata=transcription_result.provider_metadata,
+            processing_started_at=processing_started_at,
+            processing_finished_at=processing_finished_at,
+            latency_ms=self._get_latency_ms(
+                processing_started_at,
+                processing_finished_at,
             ),
-            processing_started_at=MOCK_PROCESSING_STARTED_AT,
-            processing_finished_at=MOCK_PROCESSING_FINISHED_AT,
-            latency_ms=1000,
-            failure_reason=None,
+            failure_reason=transcription_result.failure_reason,
         )
 
     def _get_evidence_window(self, payload: AnalyzeEvidenceRequest) -> EvidenceWindow:
@@ -80,4 +109,55 @@ class AnalyzeService:
             started_at=context.capture_started_at,
             ended_at=context.capture_ended_at,
             duration_ms=duration_ms,
+        )
+
+    def _build_failed_response(
+        self,
+        payload: AnalyzeEvidenceRequest,
+        processing_started_at: datetime,
+        failure_reason: str,
+    ) -> AnalyzeEvidenceResponse:
+        processing_finished_at = datetime.now(UTC)
+
+        return AnalyzeEvidenceResponse(
+            analysis_id=f"failed-analysis-{payload.evidence_record_id}",
+            analysis_version=ANALYSIS_VERSION,
+            status=AnalysisStatus.FAILED,
+            risk_level=RiskLevel.UNKNOWN,
+            confidence=0,
+            summary="Audio transcription failed before risk classification.",
+            detected_signals=["analysis_failed", failure_reason],
+            should_escalate=False,
+            recommended_action=RecommendedAction.REVIEW,
+            evidence_window=self._get_evidence_window(payload),
+            transcription=None,
+            acoustic_events=[],
+            threat_matches=[],
+            provider_metadata=AnalysisProviderMetadata(
+                provider="unavailable",
+                model="unavailable",
+                model_version=ANALYSIS_VERSION,
+            ),
+            processing_started_at=processing_started_at,
+            processing_finished_at=processing_finished_at,
+            latency_ms=self._get_latency_ms(
+                processing_started_at,
+                processing_finished_at,
+            ),
+            failure_reason=failure_reason,
+        )
+
+    def _get_latency_ms(self, started_at: datetime, finished_at: datetime) -> int:
+        return max(0, round((finished_at - started_at).total_seconds() * 1000))
+
+    def _get_summary(self, has_transcription: bool) -> str:
+        if has_transcription:
+            return (
+                "Audio transcription completed. No threat or acoustic risk "
+                "classification has run yet."
+            )
+
+        return (
+            "Mock analysis completed. No real model was executed and no "
+            "critical escalation was inferred from metadata-only input."
         )

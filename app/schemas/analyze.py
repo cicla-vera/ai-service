@@ -93,9 +93,9 @@ class AnalyzeEvidenceRequest(BaseModel):
     )
     storage_reference: str | None = Field(
         default=None,
-        max_length=500,
+        max_length=4096,
         alias="storageReference",
-        description="Opaque backend-owned reference for retrieving the evidence.",
+        description="Backend-owned signed URL, data URL, or dev-only file reference.",
     )
     capture_context: AudioCaptureContext | None = Field(
         default=None,
