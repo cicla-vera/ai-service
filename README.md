@@ -30,6 +30,11 @@ AI_SERVICE_AUDIO_FETCH_TIMEOUT_SECONDS=10
 AI_SERVICE_ALLOWED_AUDIO_HOSTS=
 AI_SERVICE_ALLOW_INSECURE_AUDIO_REFERENCES=false
 AI_SERVICE_ALLOW_FILE_REFERENCES=false
+AI_ACOUSTIC_WINDOW_MS=100
+AI_ACOUSTIC_HIGH_RMS_THRESHOLD=0.42
+AI_ACOUSTIC_PEAK_THRESHOLD=0.82
+AI_ACOUSTIC_IMPACT_DELTA_THRESHOLD=0.35
+AI_ACOUSTIC_CLIPPING_RATIO_THRESHOLD=0.03
 ```
 
 `AI_TRANSCRIPTION_PROVIDER=openai` uses OpenAI's audio transcription endpoint
@@ -48,6 +53,13 @@ SHA-256 `contentHash` before transcription. Plain `http://` references are
 blocked unless `AI_SERVICE_ALLOW_INSECURE_AUDIO_REFERENCES=true`; set
 `AI_SERVICE_ALLOWED_AUDIO_HOSTS` to a comma-separated host allowlist in shared
 or production-like environments.
+
+The acoustic detector is intentionally conservative and deterministic in this
+MVP phase. It currently inspects WAV/PCM clips for objective signals such as
+sustained high amplitude, clipping, and sudden impact-like peaks. It does not
+claim to identify emotion, prove aggression, or replace the later risk
+aggregator; it only emits timestamped `acousticEvents` and compact
+`detectedSignals` for the backend to audit and combine with other evidence.
 
 ## Run locally
 
@@ -130,7 +142,8 @@ Expected response:
     "mock_analysis",
     "metadata_received",
     "evidence_type:AUDIO",
-    "transcription_skipped:no_audio_source"
+    "transcription_skipped:no_audio_source",
+    "acoustic_detection_skipped:no_audio_source"
   ],
   "shouldEscalate": false,
   "recommendedAction": "NONE",
@@ -140,15 +153,7 @@ Expected response:
     "durationMs": 12000
   },
   "transcription": null,
-  "acousticEvents": [
-    {
-      "label": "mock_metadata_only_analysis",
-      "startMs": 0,
-      "endMs": 0,
-      "confidence": 0.12,
-      "source": "mock"
-    }
-  ],
+  "acousticEvents": [],
   "threatMatches": [],
   "providerMetadata": {
     "provider": "mock",

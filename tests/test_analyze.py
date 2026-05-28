@@ -1,5 +1,8 @@
 import base64
+import wave
 from hashlib import sha256
+from io import BytesIO
+from struct import pack
 
 import pytest
 from fastapi.testclient import TestClient
@@ -45,6 +48,7 @@ def test_analyze_returns_stable_mock_response() -> None:
         "metadata_received",
         "evidence_type:AUDIO",
         "transcription_skipped:no_audio_source",
+        "acoustic_detection_skipped:no_audio_source",
     ]
     assert body["shouldEscalate"] is False
     assert body["recommendedAction"] == "NONE"
@@ -54,15 +58,7 @@ def test_analyze_returns_stable_mock_response() -> None:
         "durationMs": None,
     }
     assert body["transcription"] is None
-    assert body["acousticEvents"] == [
-        {
-            "label": "mock_metadata_only_analysis",
-            "startMs": 0,
-            "endMs": 0,
-            "confidence": 0.12,
-            "source": "mock",
-        }
-    ]
+    assert body["acousticEvents"] == []
     assert body["threatMatches"] == []
     assert body["providerMetadata"] == {
         "provider": "mock",
@@ -191,6 +187,7 @@ def test_analyze_transcribes_mock_data_url_reference() -> None:
         "evidence_type:AUDIO",
         "transcription_completed",
         "audio_source:data_url",
+        "acoustic_detection_skipped:invalid_wav",
     ]
     assert body["transcription"] == {
         "text": "Transcricao mock da evidencia evidence-id.",
@@ -204,6 +201,48 @@ def test_analyze_transcribes_mock_data_url_reference() -> None:
             }
         ],
     }
+    assert body["acousticEvents"] == []
+
+
+def test_analyze_detects_relevant_acoustic_events_from_wav() -> None:
+    client = TestClient(app)
+    audio_bytes = _build_wav(
+        [0] * 200
+        + [32767] * 120
+        + [0] * 100
+        + [26000] * 300
+        + [0] * 280,
+    )
+    encoded_audio = base64.b64encode(audio_bytes).decode("ascii")
+
+    response = client.post(
+        "/analyze",
+        json={
+            "evidenceRecordId": "evidence-id",
+            "alertSessionId": "session-id",
+            "evidenceType": "AUDIO",
+            "mimeType": "audio/wav",
+            "size": len(audio_bytes),
+            "contentHash": sha256(audio_bytes).hexdigest(),
+            "storageReference": f"data:audio/wav;base64,{encoded_audio}",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    labels = {event["label"] for event in body["acousticEvents"]}
+
+    assert body["status"] == "COMPLETED"
+    assert body["summary"] == (
+        "Audio transcription and acoustic heuristic analysis completed. "
+        "Critical escalation remains disabled until risk aggregation runs."
+    )
+    assert "acoustic_detection_completed" in body["detectedSignals"]
+    assert "acoustic_signal:relevant" in body["detectedSignals"]
+    assert "acoustic_signal:critical_candidate" in body["detectedSignals"]
+    assert "impact_candidate" in labels
+    assert "clipping_detected" in labels
+    assert "sustained_loud_audio" in labels
 
 
 def test_analyze_returns_failed_status_for_audio_hash_mismatch() -> None:
@@ -261,3 +300,15 @@ def test_analyze_returns_failed_status_when_openai_key_is_missing(
 
     assert body["status"] == "FAILED"
     assert body["failureReason"] == "openai_api_key_missing"
+
+
+def _build_wav(samples: list[int], frame_rate: int = 1000) -> bytes:
+    buffer = BytesIO()
+
+    with wave.open(buffer, "wb") as audio:
+        audio.setnchannels(1)
+        audio.setsampwidth(2)
+        audio.setframerate(frame_rate)
+        audio.writeframes(b"".join(pack("<h", sample) for sample in samples))
+
+    return buffer.getvalue()
