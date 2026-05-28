@@ -12,3 +12,6 @@ htmlcov/
 
 # Virtual environments
 .venv
+
+# Local secrets
+.env
