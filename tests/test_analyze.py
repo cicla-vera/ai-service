@@ -14,6 +14,7 @@ from app.main import app
 def use_mock_transcription_provider(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AI_TRANSCRIPTION_PROVIDER", "mock")
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("AI_MOCK_TRANSCRIPTION_TEXT", raising=False)
 
 
 def test_analyze_returns_stable_mock_response() -> None:
@@ -49,6 +50,8 @@ def test_analyze_returns_stable_mock_response() -> None:
         "evidence_type:AUDIO",
         "transcription_skipped:no_audio_source",
         "acoustic_detection_skipped:no_audio_source",
+        "risk_aggregation_completed",
+        "risk_level:LOW",
     ]
     assert body["shouldEscalate"] is False
     assert body["recommendedAction"] == "NONE"
@@ -179,8 +182,8 @@ def test_analyze_transcribes_mock_data_url_reference() -> None:
 
     assert body["status"] == "COMPLETED"
     assert body["summary"] == (
-        "Audio transcription completed. No threat or acoustic risk "
-        "classification has run yet."
+        "Audio transcription and acoustic analysis completed without threat "
+        "signals in this first-pass classifier."
     )
     assert body["detectedSignals"] == [
         "metadata_received",
@@ -188,6 +191,8 @@ def test_analyze_transcribes_mock_data_url_reference() -> None:
         "transcription_completed",
         "audio_source:data_url",
         "acoustic_detection_skipped:invalid_wav",
+        "risk_aggregation_completed",
+        "risk_level:LOW",
     ]
     assert body["transcription"] == {
         "text": "Transcricao mock da evidencia evidence-id.",
@@ -233,16 +238,100 @@ def test_analyze_detects_relevant_acoustic_events_from_wav() -> None:
     labels = {event["label"] for event in body["acousticEvents"]}
 
     assert body["status"] == "COMPLETED"
+    assert body["riskLevel"] == "HIGH"
+    assert body["shouldEscalate"] is False
+    assert body["recommendedAction"] == "REVIEW"
     assert body["summary"] == (
-        "Audio transcription and acoustic heuristic analysis completed. "
-        "Critical escalation remains disabled until risk aggregation runs."
+        "High-risk evidence candidate detected. Store the clip and request "
+        "human review before any contact escalation."
     )
     assert "acoustic_detection_completed" in body["detectedSignals"]
     assert "acoustic_signal:relevant" in body["detectedSignals"]
     assert "acoustic_signal:critical_candidate" in body["detectedSignals"]
+    assert "risk_aggregation_completed" in body["detectedSignals"]
+    assert "risk_level:HIGH" in body["detectedSignals"]
+    assert "risk_input:acoustic_critical_candidate" in body["detectedSignals"]
     assert "impact_candidate" in labels
     assert "clipping_detected" in labels
     assert "sustained_loud_audio" in labels
+
+
+def test_analyze_marks_verbal_abuse_as_relevant_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = TestClient(app)
+    audio_bytes = b"fake audio bytes"
+    encoded_audio = base64.b64encode(audio_bytes).decode("ascii")
+    monkeypatch.setenv("AI_MOCK_TRANSCRIPTION_TEXT", "Cala a boca sua vagabunda.")
+
+    response = client.post(
+        "/analyze",
+        json={
+            "evidenceRecordId": "evidence-id",
+            "alertSessionId": "session-id",
+            "evidenceType": "AUDIO",
+            "mimeType": "audio/wav",
+            "size": len(audio_bytes),
+            "contentHash": sha256(audio_bytes).hexdigest(),
+            "storageReference": f"data:audio/wav;base64,{encoded_audio}",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+
+    assert body["status"] == "COMPLETED"
+    assert body["riskLevel"] == "MEDIUM"
+    assert body["shouldEscalate"] is False
+    assert body["recommendedAction"] == "STORE_EVIDENCE"
+    assert body["summary"] == (
+        "Relevant evidence candidate detected. Store the clip with transcript "
+        "and acoustic metadata for later review."
+    )
+    assert "risk_level:MEDIUM" in body["detectedSignals"]
+    assert "threat_signal:severe_verbal_abuse" in body["detectedSignals"]
+    assert body["threatMatches"][0]["label"] == "severe_verbal_abuse"
+    assert body["threatMatches"][0]["severity"] == "MEDIUM"
+
+
+def test_analyze_escalates_critical_concrete_threat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = TestClient(app)
+    audio_bytes = b"fake audio bytes"
+    encoded_audio = base64.b64encode(audio_bytes).decode("ascii")
+    monkeypatch.setenv("AI_MOCK_TRANSCRIPTION_TEXT", "Eu vou te matar agora.")
+
+    response = client.post(
+        "/analyze",
+        json={
+            "evidenceRecordId": "evidence-id",
+            "alertSessionId": "session-id",
+            "evidenceType": "AUDIO",
+            "mimeType": "audio/wav",
+            "size": len(audio_bytes),
+            "contentHash": sha256(audio_bytes).hexdigest(),
+            "storageReference": f"data:audio/wav;base64,{encoded_audio}",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+
+    assert body["status"] == "COMPLETED"
+    assert body["riskLevel"] == "CRITICAL"
+    assert body["confidence"] == 0.95
+    assert body["shouldEscalate"] is True
+    assert body["recommendedAction"] == "ESCALATE_CONTACTS"
+    assert body["summary"] == (
+        "Critical risk candidate detected from concrete threat language. "
+        "Escalation to emergency contacts is recommended."
+    )
+    assert "risk_level:CRITICAL" in body["detectedSignals"]
+    assert "threat_signal:concrete_lethal_threat" in body["detectedSignals"]
+    assert body["threatMatches"][0]["label"] == "concrete_lethal_threat"
+    assert body["threatMatches"][0]["severity"] == "CRITICAL"
+    assert body["threatMatches"][0]["evidence"] == "eu vou te matar"
 
 
 def test_analyze_returns_failed_status_for_audio_hash_mismatch() -> None:
