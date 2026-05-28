@@ -4,6 +4,9 @@ from dataclasses import dataclass
 from io import BytesIO
 from os import getenv
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+import httpx
 
 from app.schemas.analyze import (
     AnalysisProviderMetadata,
@@ -17,6 +20,10 @@ from app.services.audio_source import AudioSource
 DEFAULT_TRANSCRIPTION_PROVIDER = "mock"
 DEFAULT_OPENAI_TRANSCRIPTION_MODEL = "gpt-4o-mini-transcribe"
 DEFAULT_MOCK_TRANSCRIPTION_TEXT = "Transcricao mock da evidencia {evidence_record_id}."
+DEFAULT_DEEPGRAM_TRANSCRIPTION_MODEL = "nova-2"
+DEFAULT_DEEPGRAM_TRANSCRIPTION_LANGUAGE = "pt-BR"
+DEFAULT_DEEPGRAM_TRANSCRIPTION_BASE_URL = "https://api.deepgram.com/v1/listen"
+DEFAULT_DEEPGRAM_TRANSCRIPTION_TIMEOUT_SECONDS = 30
 
 
 @dataclass(frozen=True)
@@ -250,11 +257,262 @@ class OpenAITranscriptionProvider(BaseTranscriptionProvider):
         return None
 
 
+class DeepgramTranscriptionProvider(BaseTranscriptionProvider):
+    provider_name = "deepgram"
+
+    def __init__(self) -> None:
+        self.model_name = getenv(
+            "DEEPGRAM_TRANSCRIPTION_MODEL",
+            DEFAULT_DEEPGRAM_TRANSCRIPTION_MODEL,
+        )
+        self.language = getenv(
+            "DEEPGRAM_TRANSCRIPTION_LANGUAGE",
+            DEFAULT_DEEPGRAM_TRANSCRIPTION_LANGUAGE,
+        )
+        self.base_url = getenv(
+            "DEEPGRAM_TRANSCRIPTION_BASE_URL",
+            DEFAULT_DEEPGRAM_TRANSCRIPTION_BASE_URL,
+        )
+
+    def transcribe(
+        self,
+        source: AudioSource | None,
+        payload: AnalyzeEvidenceRequest,
+    ) -> TranscriptionResult:
+        if source is None:
+            raise TranscriptionError("audio_source_missing")
+
+        api_key = getenv("DEEPGRAM_API_KEY")
+        if not api_key:
+            raise TranscriptionError("deepgram_api_key_missing")
+
+        response = self._send_request(api_key=api_key, source=source)
+        transcription = self._parse_response(response)
+
+        if not transcription.text.strip():
+            return TranscriptionResult(
+                status=AnalysisStatus.INCONCLUSIVE,
+                transcription=transcription,
+                provider_metadata=self.metadata(),
+                detected_signals=[
+                    "transcription_completed",
+                    "transcription_empty",
+                    f"audio_source:{source.source_kind}",
+                ],
+                confidence=0,
+            )
+
+        return TranscriptionResult(
+            status=AnalysisStatus.COMPLETED,
+            transcription=transcription,
+            provider_metadata=self.metadata(),
+            detected_signals=[
+                "transcription_completed",
+                f"transcription_model:{self.model_name}",
+                f"audio_source:{source.source_kind}",
+                *self._get_request_signal(response),
+            ],
+            confidence=self._get_confidence(transcription),
+        )
+
+    def _send_request(self, api_key: str, source: AudioSource) -> dict[str, Any]:
+        headers = {
+            "Authorization": f"Token {api_key}",
+            "Content-Type": source.content_type,
+        }
+        params = {
+            "model": self.model_name,
+            "language": self.language,
+            "smart_format": "true",
+            "punctuate": "true",
+        }
+
+        try:
+            response = httpx.post(
+                self._get_url(params),
+                headers=headers,
+                content=source.data,
+                timeout=self._get_timeout_seconds(),
+            )
+        except httpx.HTTPError as error:
+            raise TranscriptionError("deepgram_transcription_failed") from error
+
+        if response.status_code in {401, 403}:
+            raise TranscriptionError("deepgram_auth_failed")
+
+        if response.status_code == 429:
+            raise TranscriptionError("deepgram_rate_limited")
+
+        if 400 <= response.status_code < 500:
+            raise TranscriptionError("deepgram_transcription_rejected")
+
+        if response.status_code >= 500:
+            raise TranscriptionError("deepgram_transcription_failed")
+
+        try:
+            data = response.json()
+        except ValueError as error:
+            raise TranscriptionError("deepgram_invalid_response") from error
+
+        if not isinstance(data, dict):
+            raise TranscriptionError("deepgram_invalid_response")
+
+        return data
+
+    def _parse_response(self, response: dict[str, Any]) -> AudioTranscription:
+        alternative = self._get_primary_alternative(response)
+        transcript = alternative.get("transcript")
+        words = alternative.get("words")
+
+        return AudioTranscription(
+            text=transcript if isinstance(transcript, str) else "",
+            language=self._get_language(response),
+            segments=self._parse_segments(transcript, words),
+        )
+
+    def _get_primary_alternative(self, response: dict[str, Any]) -> dict[str, Any]:
+        results = response.get("results")
+        if not isinstance(results, dict):
+            return {}
+
+        channels = results.get("channels")
+        if not isinstance(channels, list) or not channels:
+            return {}
+
+        first_channel = channels[0]
+        if not isinstance(first_channel, dict):
+            return {}
+
+        alternatives = first_channel.get("alternatives")
+        if not isinstance(alternatives, list) or not alternatives:
+            return {}
+
+        first_alternative = alternatives[0]
+
+        return first_alternative if isinstance(first_alternative, dict) else {}
+
+    def _parse_segments(
+        self,
+        transcript: Any,
+        words: Any,
+    ) -> list[TranscriptionSegment]:
+        if not isinstance(transcript, str) or not transcript:
+            return []
+
+        if not isinstance(words, list) or not words:
+            return [
+                TranscriptionSegment(
+                    start_ms=0,
+                    end_ms=0,
+                    text=transcript,
+                    confidence=None,
+                )
+            ]
+
+        first_word = words[0] if isinstance(words[0], dict) else {}
+        last_word = words[-1] if isinstance(words[-1], dict) else {}
+
+        return [
+            TranscriptionSegment(
+                start_ms=self._seconds_to_ms(first_word.get("start")),
+                end_ms=self._seconds_to_ms(last_word.get("end")),
+                text=transcript,
+                confidence=self._get_words_confidence(words),
+            )
+        ]
+
+    def _get_language(self, response: dict[str, Any]) -> str:
+        results = response.get("results")
+        if isinstance(results, dict):
+            channels = results.get("channels")
+            if isinstance(channels, list) and channels:
+                channel = channels[0]
+                if isinstance(channel, dict):
+                    detected_language = channel.get("detected_language")
+                    if isinstance(detected_language, str) and detected_language:
+                        return detected_language
+
+        return self.language
+
+    def _get_request_signal(self, response: dict[str, Any]) -> list[str]:
+        metadata = response.get("metadata")
+        if not isinstance(metadata, dict):
+            return []
+
+        request_id = metadata.get("request_id")
+        if not isinstance(request_id, str) or not request_id:
+            return []
+
+        return [f"transcription_request_id:{request_id}"]
+
+    def _get_confidence(self, transcription: AudioTranscription) -> float:
+        confidences = [
+            segment.confidence
+            for segment in transcription.segments
+            if segment.confidence is not None
+        ]
+
+        if not confidences:
+            return 0.2
+
+        return round(min(0.99, max(confidences)), 3)
+
+    def _get_words_confidence(self, words: list[Any]) -> float | None:
+        confidences = [
+            word.get("confidence")
+            for word in words
+            if isinstance(word, dict)
+            and isinstance(word.get("confidence"), (int, float))
+            and 0 <= word.get("confidence") <= 1
+        ]
+
+        if not confidences:
+            return None
+
+        return round(sum(confidences) / len(confidences), 3)
+
+    def _seconds_to_ms(self, value: Any) -> int:
+        if isinstance(value, (int, float)) and value > 0:
+            return round(value * 1000)
+
+        return 0
+
+    def _get_timeout_seconds(self) -> float:
+        raw = getenv("DEEPGRAM_TRANSCRIPTION_TIMEOUT_SECONDS")
+        if not raw:
+            return DEFAULT_DEEPGRAM_TRANSCRIPTION_TIMEOUT_SECONDS
+
+        try:
+            value = float(raw)
+        except ValueError:
+            return DEFAULT_DEEPGRAM_TRANSCRIPTION_TIMEOUT_SECONDS
+
+        return value if value > 0 else DEFAULT_DEEPGRAM_TRANSCRIPTION_TIMEOUT_SECONDS
+
+    def _get_url(self, params: dict[str, str]) -> str:
+        parts = urlsplit(self.base_url)
+        query = dict(parse_qsl(parts.query, keep_blank_values=True))
+        query.update(params)
+
+        return urlunsplit(
+            (
+                parts.scheme,
+                parts.netloc,
+                parts.path,
+                urlencode(query),
+                parts.fragment,
+            )
+        )
+
+
 def get_transcription_provider() -> BaseTranscriptionProvider:
     provider = getenv("AI_TRANSCRIPTION_PROVIDER", DEFAULT_TRANSCRIPTION_PROVIDER)
     provider = provider.strip().lower()
 
     if provider == "openai":
         return OpenAITranscriptionProvider()
+
+    if provider == "deepgram":
+        return DeepgramTranscriptionProvider()
 
     return MockTranscriptionProvider()
