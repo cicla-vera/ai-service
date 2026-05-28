@@ -9,8 +9,9 @@ from app.schemas.analyze import (
     RecommendedAction,
     RiskLevel,
 )
-from app.services.audio_source import AudioSourceError, resolve_audio_source
 from app.services.acoustic_detection_service import detect_acoustic_events
+from app.services.audio_source import AudioSourceError, resolve_audio_source
+from app.services.risk_aggregation_service import aggregate_risk
 from app.services.transcription_service import (
     TranscriptionError,
     get_transcription_provider,
@@ -52,10 +53,12 @@ class AnalyzeService:
         if transcription_result.transcription is None:
             detected_signals.insert(0, "mock_analysis")
 
-        summary = self._get_summary(
-            has_transcription=transcription_result.transcription is not None,
-            acoustic_events_count=len(acoustic_result.events),
+        risk_result = aggregate_risk(
+            transcription=transcription_result.transcription,
+            acoustic_events=acoustic_result.events,
+            capture_context=payload.capture_context,
         )
+        detected_signals.extend(risk_result.detected_signals)
 
         return AnalyzeEvidenceResponse(
             analysis_id=(
@@ -64,16 +67,20 @@ class AnalyzeService:
             ),
             analysis_version=ANALYSIS_VERSION,
             status=transcription_result.status,
-            risk_level=RiskLevel.LOW,
-            confidence=max(transcription_result.confidence, acoustic_result.confidence),
-            summary=summary,
+            risk_level=risk_result.risk_level,
+            confidence=max(
+                transcription_result.confidence,
+                acoustic_result.confidence,
+                risk_result.confidence,
+            ),
+            summary=risk_result.summary,
             detected_signals=detected_signals,
-            should_escalate=False,
-            recommended_action=RecommendedAction.NONE,
+            should_escalate=risk_result.should_escalate,
+            recommended_action=risk_result.recommended_action,
             evidence_window=self._get_evidence_window(payload),
             transcription=transcription_result.transcription,
             acoustic_events=acoustic_result.events,
-            threat_matches=[],
+            threat_matches=risk_result.threat_matches,
             provider_metadata=transcription_result.provider_metadata,
             processing_started_at=processing_started_at,
             processing_finished_at=processing_finished_at,
@@ -146,21 +153,3 @@ class AnalyzeService:
 
     def _get_latency_ms(self, started_at: datetime, finished_at: datetime) -> int:
         return max(0, round((finished_at - started_at).total_seconds() * 1000))
-
-    def _get_summary(self, has_transcription: bool, acoustic_events_count: int) -> str:
-        if has_transcription and acoustic_events_count > 0:
-            return (
-                "Audio transcription and acoustic heuristic analysis completed. "
-                "Critical escalation remains disabled until risk aggregation runs."
-            )
-
-        if has_transcription:
-            return (
-                "Audio transcription completed. No threat or acoustic risk "
-                "classification has run yet."
-            )
-
-        return (
-            "Mock analysis completed. No real model was executed and no "
-            "critical escalation was inferred from metadata-only input."
-        )

@@ -21,6 +21,7 @@ when testing a real provider:
 
 ```env
 AI_TRANSCRIPTION_PROVIDER=mock
+AI_MOCK_TRANSCRIPTION_TEXT=
 OPENAI_API_KEY=
 OPENAI_TRANSCRIPTION_MODEL=gpt-4o-mini-transcribe
 OPENAI_TRANSCRIPTION_LANGUAGE=pt
@@ -42,6 +43,9 @@ through the official Python SDK. The default model is
 `gpt-4o-mini-transcribe`; use `gpt-4o-transcribe` if accuracy is more important
 than cost/latency for a specific environment.
 
+`AI_MOCK_TRANSCRIPTION_TEXT` is optional and exists for local/dev tests that
+need to simulate a specific transcript without spending provider credits.
+
 The current `/analyze` JSON contract accepts `storageReference` in three forms:
 
 - `data:audio/...;base64,...` for small local tests.
@@ -60,6 +64,14 @@ sustained high amplitude, clipping, and sudden impact-like peaks. It does not
 claim to identify emotion, prove aggression, or replace the later risk
 aggregator; it only emits timestamped `acousticEvents` and compact
 `detectedSignals` for the backend to audit and combine with other evidence.
+
+The risk aggregator is also deterministic in this first MVP implementation. It
+combines transcript phrase patterns, acoustic events, and capture context into
+`LOW`, `MEDIUM`, `HIGH`, or `CRITICAL` risk. `CRITICAL` is intentionally
+reserved for concrete threat language, explicit emergency context, or a strong
+combination of high-risk speech and impact-like acoustic signals. These outputs
+are triage signals for Vera workflows, not legal conclusions or proof of a
+crime.
 
 ## Run locally
 
@@ -90,13 +102,13 @@ The `/analyze` endpoint defines the v1 contract for Vera audio evidence
 analysis. By default it uses deterministic mock transcription for integration
 tests. When `AI_TRANSCRIPTION_PROVIDER=openai` and `OPENAI_API_KEY` are set, it
 resolves `storageReference`, verifies hash/size, and sends the audio to the
-configured speech-to-text model. Threat and acoustic risk classification are
-still future work, so this endpoint never infers critical escalation yet.
+configured speech-to-text model. It then runs a deterministic acoustic detector
+and risk aggregator before returning the final classification.
 
 Version `audio-evidence-v1` only accepts `AUDIO` evidence with an `audio/*`
-MIME type. Later provider work will fill transcription, acoustic events, threat
-matches, and risk classification from real model output without changing the
-top-level response contract.
+MIME type. Later provider work can improve transcription, acoustic events,
+threat matches, and risk classification from real model output without changing
+the top-level response contract.
 
 ```bash
 curl -X POST http://localhost:8000/analyze \
@@ -143,7 +155,9 @@ Expected response:
     "metadata_received",
     "evidence_type:AUDIO",
     "transcription_skipped:no_audio_source",
-    "acoustic_detection_skipped:no_audio_source"
+    "acoustic_detection_skipped:no_audio_source",
+    "risk_aggregation_completed",
+    "risk_level:LOW"
   ],
   "shouldEscalate": false,
   "recommendedAction": "NONE",

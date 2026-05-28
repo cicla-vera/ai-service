@@ -16,6 +16,7 @@ from app.services.audio_source import AudioSource
 
 DEFAULT_TRANSCRIPTION_PROVIDER = "mock"
 DEFAULT_OPENAI_TRANSCRIPTION_MODEL = "gpt-4o-mini-transcribe"
+DEFAULT_MOCK_TRANSCRIPTION_TEXT = "Transcricao mock da evidencia {evidence_record_id}."
 
 
 @dataclass(frozen=True)
@@ -72,14 +73,20 @@ class MockTranscriptionProvider(BaseTranscriptionProvider):
             )
 
         duration_ms = self._get_duration_ms(payload)
+        text = getenv(
+            "AI_MOCK_TRANSCRIPTION_TEXT",
+        ) or DEFAULT_MOCK_TRANSCRIPTION_TEXT.format(
+            evidence_record_id=payload.evidence_record_id,
+        )
+
         transcription = AudioTranscription(
-            text=f"Transcricao mock da evidencia {payload.evidence_record_id}.",
+            text=text,
             language="pt",
             segments=[
                 TranscriptionSegment(
                     start_ms=0,
                     end_ms=duration_ms,
-                    text=f"Transcricao mock da evidencia {payload.evidence_record_id}.",
+                    text=text,
                     confidence=0.99,
                 )
             ],
