@@ -8,6 +8,10 @@ from os import getenv
 from struct import unpack
 
 from app.schemas.analyze import AcousticEvent
+from app.services.audio_normalization_service import (
+    AudioNormalizationError,
+    normalize_audio_for_acoustic_detection,
+)
 from app.services.audio_source import AudioSource
 
 DEFAULT_WINDOW_MS = 100
@@ -42,15 +46,15 @@ def detect_acoustic_events(source: AudioSource | None) -> AcousticDetectionResul
             confidence=0,
         )
 
-    if not _looks_like_wav(source):
+    try:
+        normalized = normalize_audio_for_acoustic_detection(source)
+        windows = _read_pcm_windows(normalized.data)
+    except AudioNormalizationError as error:
         return AcousticDetectionResult(
             events=[],
-            detected_signals=["acoustic_detection_skipped:unsupported_format"],
+            detected_signals=[f"acoustic_detection_skipped:{error.code}"],
             confidence=0,
         )
-
-    try:
-        windows = _read_pcm_windows(source.data)
     except (EOFError, ValueError, wave.Error):
         return AcousticDetectionResult(
             events=[],
@@ -59,7 +63,7 @@ def detect_acoustic_events(source: AudioSource | None) -> AcousticDetectionResul
         )
 
     events = _detect_events(windows)
-    signals = ["acoustic_detection_completed"]
+    signals = [*normalized.detected_signals, "acoustic_detection_completed"]
 
     if events:
         signals.append("acoustic_signal:relevant")
@@ -71,13 +75,6 @@ def detect_acoustic_events(source: AudioSource | None) -> AcousticDetectionResul
         events=events,
         detected_signals=signals,
         confidence=max((event.confidence for event in events), default=0),
-    )
-
-
-def _looks_like_wav(source: AudioSource) -> bool:
-    return (
-        source.content_type.lower() in {"audio/wav", "audio/x-wav", "audio/wave"}
-        or source.filename.lower().endswith(".wav")
     )
 
 

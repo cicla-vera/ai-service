@@ -3,6 +3,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+MAX_STORAGE_REFERENCE_CHARACTERS = 36 * 1024 * 1024
+
 
 class RiskLevel(StrEnum):
     LOW = "LOW"
@@ -93,9 +95,12 @@ class AnalyzeEvidenceRequest(BaseModel):
     )
     storage_reference: str | None = Field(
         default=None,
-        max_length=4096,
+        max_length=MAX_STORAGE_REFERENCE_CHARACTERS,
         alias="storageReference",
-        description="Backend-owned signed URL, data URL, or dev-only file reference.",
+        description=(
+            "Backend-owned signed URL, data URL, or dev-only file reference. "
+            "Resolved audio bytes remain subject to stricter size and hash checks."
+        ),
     )
     capture_context: AudioCaptureContext | None = Field(
         default=None,
