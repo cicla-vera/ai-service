@@ -4,6 +4,7 @@ from hashlib import sha256
 from io import BytesIO
 from struct import pack
 
+import av
 import pytest
 from fastapi.testclient import TestClient
 
@@ -255,6 +256,126 @@ def test_analyze_detects_relevant_acoustic_events_from_wav() -> None:
     assert "impact_candidate" in labels
     assert "clipping_detected" in labels
     assert "sustained_loud_audio" in labels
+
+
+def test_analyze_detects_acoustic_events_from_mobile_m4a() -> None:
+    client = TestClient(app)
+    audio_bytes = _build_m4a(
+        [0] * 1600
+        + [32767] * 960
+        + [0] * 800
+        + [28000] * 2400
+        + [0] * 2240,
+    )
+    encoded_audio = base64.b64encode(audio_bytes).decode("ascii")
+
+    response = client.post(
+        "/analyze",
+        json={
+            "evidenceRecordId": "evidence-id",
+            "alertSessionId": "session-id",
+            "evidenceType": "AUDIO",
+            "mimeType": "audio/mp4",
+            "size": len(audio_bytes),
+            "contentHash": sha256(audio_bytes).hexdigest(),
+            "storageReference": f"data:audio/mp4;base64,{encoded_audio}",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    labels = {event["label"] for event in body["acousticEvents"]}
+
+    assert body["status"] == "COMPLETED"
+    assert "acoustic_normalization:mobile_audio_to_pcm_s16le" in body["detectedSignals"]
+    assert "acoustic_normalization_sample_rate:16000" in body["detectedSignals"]
+    assert "acoustic_detection_completed" in body["detectedSignals"]
+    assert "acoustic_signal:relevant" in body["detectedSignals"]
+    assert "sustained_loud_audio" in labels
+    assert "impact_candidate" in labels
+
+
+def test_analyze_skips_invalid_mobile_m4a_safely() -> None:
+    client = TestClient(app)
+    audio_bytes = b"invalid m4a bytes"
+    encoded_audio = base64.b64encode(audio_bytes).decode("ascii")
+
+    response = client.post(
+        "/analyze",
+        json={
+            "evidenceRecordId": "evidence-id",
+            "alertSessionId": "session-id",
+            "evidenceType": "AUDIO",
+            "mimeType": "audio/mp4",
+            "size": len(audio_bytes),
+            "contentHash": sha256(audio_bytes).hexdigest(),
+            "storageReference": f"data:audio/mp4;base64,{encoded_audio}",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+
+    assert body["status"] == "COMPLETED"
+    assert body["acousticEvents"] == []
+    assert "acoustic_detection_skipped:invalid_audio" in body["detectedSignals"]
+
+
+def test_analyze_skips_unsupported_acoustic_format_safely() -> None:
+    client = TestClient(app)
+    audio_bytes = b"fake mp3 bytes"
+    encoded_audio = base64.b64encode(audio_bytes).decode("ascii")
+
+    response = client.post(
+        "/analyze",
+        json={
+            "evidenceRecordId": "evidence-id",
+            "alertSessionId": "session-id",
+            "evidenceType": "AUDIO",
+            "mimeType": "audio/mpeg",
+            "size": len(audio_bytes),
+            "contentHash": sha256(audio_bytes).hexdigest(),
+            "storageReference": f"data:audio/mpeg;base64,{encoded_audio}",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+
+    assert body["status"] == "COMPLETED"
+    assert body["acousticEvents"] == []
+    assert "acoustic_detection_skipped:unsupported_format" in body["detectedSignals"]
+
+
+def test_analyze_stops_mobile_audio_normalization_after_duration_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = TestClient(app)
+    audio_bytes = _build_m4a([12000] * 16_000)
+    encoded_audio = base64.b64encode(audio_bytes).decode("ascii")
+    monkeypatch.setenv("AI_ACOUSTIC_MAX_DURATION_SECONDS", "1")
+
+    response = client.post(
+        "/analyze",
+        json={
+            "evidenceRecordId": "evidence-id",
+            "alertSessionId": "session-id",
+            "evidenceType": "AUDIO",
+            "mimeType": "audio/mp4",
+            "size": len(audio_bytes),
+            "contentHash": sha256(audio_bytes).hexdigest(),
+            "storageReference": f"data:audio/mp4;base64,{encoded_audio}",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+
+    assert body["status"] == "COMPLETED"
+    assert body["acousticEvents"] == []
+    assert "acoustic_detection_skipped:duration_limit_exceeded" in body[
+        "detectedSignals"
+    ]
 
 
 def test_analyze_marks_verbal_abuse_as_relevant_evidence(
@@ -528,5 +649,24 @@ def _build_wav(samples: list[int], frame_rate: int = 1000) -> bytes:
         audio.setsampwidth(2)
         audio.setframerate(frame_rate)
         audio.writeframes(b"".join(pack("<h", sample) for sample in samples))
+
+    return buffer.getvalue()
+
+
+def _build_m4a(samples: list[int], frame_rate: int = 8000) -> bytes:
+    buffer = BytesIO()
+
+    with av.open(buffer, mode="w", format="mp4") as output:
+        stream = output.add_stream("aac", rate=frame_rate)
+        stream.layout = "mono"
+        frame = av.AudioFrame(format="s16", layout="mono", samples=len(samples))
+        frame.sample_rate = frame_rate
+        frame.planes[0].update(b"".join(pack("<h", sample) for sample in samples))
+
+        for packet in stream.encode(frame):
+            output.mux(packet)
+
+        for packet in stream.encode():
+            output.mux(packet)
 
     return buffer.getvalue()

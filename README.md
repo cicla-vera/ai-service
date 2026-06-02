@@ -37,6 +37,7 @@ AI_SERVICE_ALLOWED_AUDIO_HOSTS=
 AI_SERVICE_ALLOW_INSECURE_AUDIO_REFERENCES=false
 AI_SERVICE_ALLOW_FILE_REFERENCES=false
 AI_ACOUSTIC_WINDOW_MS=100
+AI_ACOUSTIC_MAX_DURATION_SECONDS=120
 AI_ACOUSTIC_HIGH_RMS_THRESHOLD=0.42
 AI_ACOUSTIC_PEAK_THRESHOLD=0.82
 AI_ACOUSTIC_IMPACT_DELTA_THRESHOLD=0.35
@@ -69,10 +70,14 @@ blocked unless `AI_SERVICE_ALLOW_INSECURE_AUDIO_REFERENCES=true`; set
 or production-like environments.
 
 The acoustic detector is intentionally conservative and deterministic in this
-MVP phase. It currently inspects WAV/PCM clips for objective signals such as
-sustained high amplitude, clipping, and sudden impact-like peaks. It does not
-claim to identify emotion, prove aggression, or replace the later risk
-aggregator; it only emits timestamped `acousticEvents` and compact
+MVP phase. It inspects WAV/PCM clips directly and normalizes the mobile
+`.m4a`/AAC format to mono 16 kHz PCM in memory before detecting objective
+signals such as sustained high amplitude, clipping, and sudden impact-like
+peaks. The compressed original remains the evidence source and is not replaced
+by this temporary analysis representation. Decoding stops after
+`AI_ACOUSTIC_MAX_DURATION_SECONDS` to bound expansion of compressed input. The
+detector does not claim to identify emotion, prove aggression, or replace the
+later risk aggregator; it only emits timestamped `acousticEvents` and compact
 `detectedSignals` for the backend to audit and combine with other evidence.
 
 The risk aggregator is also deterministic in this first MVP implementation. It
