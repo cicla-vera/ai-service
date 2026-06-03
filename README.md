@@ -130,6 +130,38 @@ uv run ai-service
 
 The service starts at `http://localhost:8000`.
 
+## Evaluation harness
+
+Use the evaluation harness before changing provider order, acoustic thresholds
+or risk rules. The default mock mode runs public synthetic audio fixtures and
+fixed transcripts, so it is safe for CI and does not spend provider credits:
+
+```bash
+uv run vera-ai-eval
+uv run vera-ai-eval --format json --output evaluation/reports/mock.json
+```
+
+For a real provider or fallback chain, keep consented audio fixtures outside
+git in `evaluation/local-fixtures/`, named by case id such as
+`lethal_threat.m4a` or `distress_with_impact.wav`, then run:
+
+```bash
+AI_TRANSCRIPTION_PROVIDER_CHAIN=deepgram,assemblyai,groq,openai \
+  uv run vera-ai-eval \
+  --provider-mode configured \
+  --fixtures-dir evaluation/local-fixtures \
+  --output evaluation/reports/configured.md \
+  --allow-failures
+```
+
+The report includes pass/fail, false positives, false negatives, current
+thresholds, model/provider metadata, approximate latency, total audio seconds
+and optional estimated cost. Set `AI_EVALUATION_COST_USD_PER_HOUR` or pass
+`--cost-usd-per-hour` when you want cost estimates for a provider run.
+Synthetic fixtures validate the current deterministic policy; real provider
+mode is still required to evaluate transcription accuracy on consented test
+audio.
+
 ## Health check
 
 ```bash

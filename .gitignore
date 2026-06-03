@@ -15,3 +15,7 @@ htmlcov/
 
 # Local secrets
 .env
+
+# Local evaluation artifacts
+evaluation/local-fixtures/
+evaluation/reports/

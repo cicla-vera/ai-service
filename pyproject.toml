@@ -15,6 +15,7 @@ dependencies = [
 
 [project.scripts]
 ai-service = "app.cli:main"
+vera-ai-eval = "app.evaluation:main"
 
 [dependency-groups]
 dev = [
