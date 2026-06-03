@@ -274,3 +274,7 @@ backend can consume a stable compact summary, while richer details live in
 ```bash
 uv run pytest
 ```
+
+## Architecture Notes
+
+- [Triggered audio streaming spike](docs/triggered-streaming-spike.md)
