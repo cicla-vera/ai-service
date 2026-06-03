@@ -40,6 +40,7 @@ class AnalyzeService:
                 payload=payload,
                 processing_started_at=processing_started_at,
                 failure_reason=error.code,
+                detected_signals=error.detected_signals,
             )
 
         processing_finished_at = datetime.now(UTC)
@@ -120,6 +121,7 @@ class AnalyzeService:
         payload: AnalyzeEvidenceRequest,
         processing_started_at: datetime,
         failure_reason: str,
+        detected_signals: list[str] | None = None,
     ) -> AnalyzeEvidenceResponse:
         processing_finished_at = datetime.now(UTC)
 
@@ -130,7 +132,11 @@ class AnalyzeService:
             risk_level=RiskLevel.UNKNOWN,
             confidence=0,
             summary="Audio transcription failed before risk classification.",
-            detected_signals=["analysis_failed", failure_reason],
+            detected_signals=[
+                "analysis_failed",
+                failure_reason,
+                *(detected_signals or []),
+            ],
             should_escalate=False,
             recommended_action=RecommendedAction.REVIEW,
             evidence_window=self._get_evidence_window(payload),

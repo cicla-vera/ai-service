@@ -21,6 +21,7 @@ when testing a real provider:
 
 ```env
 AI_TRANSCRIPTION_PROVIDER=mock
+AI_TRANSCRIPTION_PROVIDER_CHAIN=
 AI_MOCK_TRANSCRIPTION_TEXT=
 OPENAI_API_KEY=
 OPENAI_TRANSCRIPTION_MODEL=gpt-4o-mini-transcribe
@@ -31,6 +32,19 @@ DEEPGRAM_TRANSCRIPTION_MODEL=nova-2
 DEEPGRAM_TRANSCRIPTION_LANGUAGE=pt-BR
 DEEPGRAM_TRANSCRIPTION_BASE_URL=https://api.deepgram.com/v1/listen
 DEEPGRAM_TRANSCRIPTION_TIMEOUT_SECONDS=30
+GROQ_API_KEY=
+GROQ_TRANSCRIPTION_MODEL=whisper-large-v3-turbo
+GROQ_TRANSCRIPTION_LANGUAGE=pt
+GROQ_TRANSCRIPTION_PROMPT=
+GROQ_TRANSCRIPTION_BASE_URL=https://api.groq.com/openai/v1/audio/transcriptions
+GROQ_TRANSCRIPTION_TIMEOUT_SECONDS=30
+ASSEMBLYAI_API_KEY=
+ASSEMBLYAI_TRANSCRIPTION_BASE_URL=https://api.assemblyai.com
+ASSEMBLYAI_TRANSCRIPTION_SPEECH_MODELS=universal-3-pro,universal-2
+ASSEMBLYAI_TRANSCRIPTION_LANGUAGE_CODE=pt
+ASSEMBLYAI_TRANSCRIPTION_TIMEOUT_SECONDS=60
+ASSEMBLYAI_TRANSCRIPTION_POLL_INTERVAL_SECONDS=2
+ASSEMBLYAI_HTTP_TIMEOUT_SECONDS=30
 AI_SERVICE_MAX_AUDIO_SOURCE_BYTES=26214400
 AI_SERVICE_AUDIO_FETCH_TIMEOUT_SECONDS=10
 AI_SERVICE_ALLOWED_AUDIO_HOSTS=
@@ -44,6 +58,15 @@ AI_ACOUSTIC_IMPACT_DELTA_THRESHOLD=0.35
 AI_ACOUSTIC_CLIPPING_RATIO_THRESHOLD=0.03
 ```
 
+`AI_TRANSCRIPTION_PROVIDER_CHAIN` enables resilient provider fallback. When it
+is set, it overrides `AI_TRANSCRIPTION_PROVIDER` and tries providers in order,
+for example `deepgram,assemblyai,groq,openai`. Fallback is only used for
+availability-style failures such as missing credentials, auth/provider outages,
+rate limits, timeouts or invalid provider responses. Provider rejections for the
+audio/request itself, such as unsupported or invalid media, stop the chain so a
+bad evidence file is not hidden by another provider. The response records
+attempted, failed, fallback and selected providers in `detectedSignals`.
+
 `AI_TRANSCRIPTION_PROVIDER=openai` uses OpenAI's audio transcription endpoint
 through the official Python SDK. The default model is
 `gpt-4o-mini-transcribe`; use `gpt-4o-transcribe` if accuracy is more important
@@ -53,6 +76,17 @@ than cost/latency for a specific environment.
 endpoint. The default model is `nova-2` with `pt-BR` because that path has
 documented Portuguese support; set `DEEPGRAM_TRANSCRIPTION_MODEL=nova-3` when
 you want to evaluate the newer model for a specific environment.
+
+`AI_TRANSCRIPTION_PROVIDER=groq` uses Groq's OpenAI-compatible speech-to-text
+endpoint. The default `whisper-large-v3-turbo` model is optimized for low
+latency and low cost; use `whisper-large-v3` if accuracy matters more for a
+specific test.
+
+`AI_TRANSCRIPTION_PROVIDER=assemblyai` uploads the audio bytes to AssemblyAI,
+submits an async transcript job and polls until completion or
+`ASSEMBLYAI_TRANSCRIPTION_TIMEOUT_SECONDS`. The default speech model order is
+`universal-3-pro,universal-2`, matching AssemblyAI's recommended fallback-style
+model selection for broad language support.
 
 `AI_MOCK_TRANSCRIPTION_TEXT` is optional and exists for local/dev tests that
 need to simulate a specific transcript without spending provider credits.
@@ -115,11 +149,11 @@ Expected response:
 
 The `/analyze` endpoint defines the v1 contract for Vera audio evidence
 analysis. By default it uses deterministic mock transcription for integration
-tests. When `AI_TRANSCRIPTION_PROVIDER=openai` or
-`AI_TRANSCRIPTION_PROVIDER=deepgram` is configured with the corresponding API
-key, it resolves `storageReference`, verifies hash/size, and sends the audio to
-the configured speech-to-text model. It then runs a deterministic acoustic
-detector and risk aggregator before returning the final classification.
+tests. When a real provider is configured through `AI_TRANSCRIPTION_PROVIDER`
+or a fallback order is configured through `AI_TRANSCRIPTION_PROVIDER_CHAIN`, it
+resolves `storageReference`, verifies hash/size, and sends the audio to the
+selected speech-to-text model. It then runs a deterministic acoustic detector
+and risk aggregator before returning the final classification.
 
 Version `audio-evidence-v1` only accepts `AUDIO` evidence with an `audio/*`
 MIME type. Later provider work can improve transcription, acoustic events,

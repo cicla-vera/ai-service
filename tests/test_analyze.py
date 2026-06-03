@@ -11,11 +11,23 @@ from fastapi.testclient import TestClient
 from app.main import app
 
 
+class FakeJsonResponse:
+    def __init__(self, status_code: int, payload: dict) -> None:
+        self.status_code = status_code
+        self.payload = payload
+
+    def json(self) -> dict:
+        return self.payload
+
+
 @pytest.fixture(autouse=True)
 def use_mock_transcription_provider(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AI_TRANSCRIPTION_PROVIDER", "mock")
+    monkeypatch.delenv("AI_TRANSCRIPTION_PROVIDER_CHAIN", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("DEEPGRAM_API_KEY", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.delenv("ASSEMBLYAI_API_KEY", raising=False)
     monkeypatch.delenv("AI_MOCK_TRANSCRIPTION_TEXT", raising=False)
 
 
@@ -639,6 +651,239 @@ def test_analyze_transcribes_deepgram_response(
     assert "transcription_model:nova-2" in body["detectedSignals"]
     assert "transcription_request_id:dg-request-id" in body["detectedSignals"]
     assert "threat_signal:concrete_lethal_threat" in body["detectedSignals"]
+
+
+def test_analyze_falls_back_from_deepgram_to_groq(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = TestClient(app)
+    audio_bytes = b"fake audio bytes"
+    encoded_audio = base64.b64encode(audio_bytes).decode("ascii")
+    captured_request = {}
+    monkeypatch.setenv("AI_TRANSCRIPTION_PROVIDER_CHAIN", "deepgram,groq")
+    monkeypatch.delenv("DEEPGRAM_API_KEY", raising=False)
+    monkeypatch.setenv("GROQ_API_KEY", "groq-test-key")
+
+    def fake_post(url: str, **kwargs):
+        captured_request["url"] = url
+        captured_request.update(kwargs)
+        return FakeJsonResponse(
+            200,
+            {
+                "text": "Eu vou te matar agora.",
+                "language": "pt",
+                "segments": [
+                    {
+                        "start": 0,
+                        "end": 1.2,
+                        "text": "Eu vou te matar agora.",
+                        "avg_logprob": -0.08,
+                    }
+                ],
+            },
+        )
+
+    monkeypatch.setattr("app.services.transcription_service.httpx.post", fake_post)
+
+    response = client.post(
+        "/analyze",
+        json={
+            "evidenceRecordId": "evidence-id",
+            "alertSessionId": "session-id",
+            "evidenceType": "AUDIO",
+            "mimeType": "audio/wav",
+            "size": len(audio_bytes),
+            "contentHash": sha256(audio_bytes).hexdigest(),
+            "storageReference": f"data:audio/wav;base64,{encoded_audio}",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+
+    assert captured_request["url"] == (
+        "https://api.groq.com/openai/v1/audio/transcriptions"
+    )
+    assert captured_request["headers"]["Authorization"] == "Bearer groq-test-key"
+    assert captured_request["data"]["model"] == "whisper-large-v3-turbo"
+    assert captured_request["data"]["language"] == "pt"
+    assert captured_request["files"]["file"] == (
+        "evidence-id.audio",
+        audio_bytes,
+        "audio/wav",
+    )
+    assert body["status"] == "COMPLETED"
+    assert body["riskLevel"] == "CRITICAL"
+    assert body["providerMetadata"] == {
+        "provider": "groq",
+        "model": "whisper-large-v3-turbo",
+        "modelVersion": "whisper-large-v3-turbo",
+    }
+    assert "transcription_provider_chain:deepgram>groq" in body["detectedSignals"]
+    assert (
+        "transcription_provider_failed:deepgram:deepgram_api_key_missing"
+        in body["detectedSignals"]
+    )
+    assert (
+        "transcription_fallback:deepgram:deepgram_api_key_missing"
+        in body["detectedSignals"]
+    )
+    assert "transcription_provider_selected:groq" in body["detectedSignals"]
+
+
+def test_analyze_does_not_fallback_after_terminal_provider_rejection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = TestClient(app)
+    audio_bytes = b"fake audio bytes"
+    encoded_audio = base64.b64encode(audio_bytes).decode("ascii")
+    requested_urls: list[str] = []
+    monkeypatch.setenv("AI_TRANSCRIPTION_PROVIDER_CHAIN", "deepgram,groq")
+    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test-key")
+    monkeypatch.setenv("GROQ_API_KEY", "groq-test-key")
+
+    def fake_post(url: str, **kwargs):
+        requested_urls.append(url)
+        return FakeJsonResponse(400, {"error": "unsupported media"})
+
+    monkeypatch.setattr("app.services.transcription_service.httpx.post", fake_post)
+
+    response = client.post(
+        "/analyze",
+        json={
+            "evidenceRecordId": "evidence-id",
+            "alertSessionId": "session-id",
+            "evidenceType": "AUDIO",
+            "mimeType": "audio/wav",
+            "size": len(audio_bytes),
+            "contentHash": sha256(audio_bytes).hexdigest(),
+            "storageReference": f"data:audio/wav;base64,{encoded_audio}",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+
+    assert requested_urls == [
+        "https://api.deepgram.com/v1/listen?model=nova-2&language=pt-BR&"
+        "smart_format=true&punctuate=true",
+    ]
+    assert body["status"] == "FAILED"
+    assert body["failureReason"] == "deepgram_transcription_rejected"
+    assert (
+        "transcription_provider_failed:deepgram:deepgram_transcription_rejected"
+        in body["detectedSignals"]
+    )
+    assert not any(
+        "transcription_provider_selected:groq" == signal
+        for signal in body["detectedSignals"]
+    )
+
+
+def test_analyze_transcribes_assemblyai_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = TestClient(app)
+    audio_bytes = b"fake audio bytes"
+    encoded_audio = base64.b64encode(audio_bytes).decode("ascii")
+    requests: list[tuple[str, dict]] = []
+    monkeypatch.setenv("AI_TRANSCRIPTION_PROVIDER", "assemblyai")
+    monkeypatch.setenv("ASSEMBLYAI_API_KEY", "assembly-test-key")
+
+    def fake_post(url: str, **kwargs):
+        requests.append((url, kwargs))
+        if url.endswith("/v2/upload"):
+            return FakeJsonResponse(200, {"upload_url": "https://upload.example/audio"})
+
+        if url.endswith("/v2/transcript"):
+            return FakeJsonResponse(200, {"id": "assembly-transcript-id"})
+
+        raise AssertionError(f"Unexpected POST {url}")
+
+    def fake_get(url: str, **kwargs):
+        requests.append((url, kwargs))
+        return FakeJsonResponse(
+            200,
+            {
+                "id": "assembly-transcript-id",
+                "status": "completed",
+                "text": "Eu vou te matar agora.",
+                "language_code": "pt",
+                "speech_model_used": "universal-3-pro",
+                "words": [
+                    {
+                        "text": "Eu",
+                        "start": 0,
+                        "end": 100,
+                        "confidence": 0.96,
+                    },
+                    {
+                        "text": "agora",
+                        "start": 900,
+                        "end": 1200,
+                        "confidence": 0.94,
+                    },
+                ],
+            },
+        )
+
+    monkeypatch.setattr("app.services.transcription_service.httpx.post", fake_post)
+    monkeypatch.setattr("app.services.transcription_service.httpx.get", fake_get)
+
+    response = client.post(
+        "/analyze",
+        json={
+            "evidenceRecordId": "evidence-id",
+            "alertSessionId": "session-id",
+            "evidenceType": "AUDIO",
+            "mimeType": "audio/wav",
+            "size": len(audio_bytes),
+            "contentHash": sha256(audio_bytes).hexdigest(),
+            "storageReference": f"data:audio/wav;base64,{encoded_audio}",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+
+    assert requests[0][0] == "https://api.assemblyai.com/v2/upload"
+    assert requests[0][1]["headers"]["Authorization"] == "assembly-test-key"
+    assert requests[0][1]["content"] == audio_bytes
+    assert requests[1][0] == "https://api.assemblyai.com/v2/transcript"
+    assert requests[1][1]["json"] == {
+        "audio_url": "https://upload.example/audio",
+        "speech_models": ["universal-3-pro", "universal-2"],
+        "punctuate": True,
+        "format_text": True,
+        "language_code": "pt",
+    }
+    assert requests[2][0] == (
+        "https://api.assemblyai.com/v2/transcript/assembly-transcript-id"
+    )
+    assert body["status"] == "COMPLETED"
+    assert body["riskLevel"] == "CRITICAL"
+    assert body["providerMetadata"] == {
+        "provider": "assemblyai",
+        "model": "universal-3-pro",
+        "modelVersion": "universal-3-pro",
+    }
+    assert body["transcription"] == {
+        "text": "Eu vou te matar agora.",
+        "language": "pt",
+        "segments": [
+            {
+                "startMs": 0,
+                "endMs": 1200,
+                "text": "Eu vou te matar agora.",
+                "confidence": 0.95,
+            }
+        ],
+    }
+    assert "transcription_model:universal-3-pro" in body["detectedSignals"]
+    assert (
+        "transcription_request_id:assembly-transcript-id"
+        in body["detectedSignals"]
+    )
 
 
 def _build_wav(samples: list[int], frame_rate: int = 1000) -> bytes:
