@@ -5,16 +5,20 @@ description = "FastAPI service for Cicla Vera evidence analysis."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "av>=17.0.1",
     "fastapi>=0.115.0",
+    "httpx>=0.28.0",
+    "openai>=2.38.0",
+    "python-dotenv>=1.2.2",
     "uvicorn[standard]>=0.30.0",
 ]
 
 [project.scripts]
 ai-service = "app.cli:main"
+vera-ai-eval = "app.evaluation:main"
 
 [dependency-groups]
 dev = [
-    "httpx>=0.28.0",
     "pytest>=8.0.0",
 ]
 
