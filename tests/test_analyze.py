@@ -152,6 +152,82 @@ def test_analyze_accepts_capture_context() -> None:
     }
 
 
+def test_analyze_does_not_mark_volume_spike_context_as_high_risk() -> None:
+    client = TestClient(app)
+
+    response = client.post(
+        "/analyze",
+        json={
+            "evidenceRecordId": "evidence-id",
+            "alertSessionId": "session-id",
+            "evidenceType": "AUDIO",
+            "mimeType": "audio/m4a",
+            "size": 1024,
+            "contentHash": "b" * 64,
+            "captureContext": {
+                "triggerReasons": ["voice_activity", "volume_spike"],
+                "localConfidence": 0.77,
+                "platform": "android",
+                "foreground": False,
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+
+    assert body["riskLevel"] == "MEDIUM"
+    assert body["shouldEscalate"] is False
+    assert body["recommendedAction"] == "STORE_EVIDENCE"
+    assert "risk_level:MEDIUM" in body["detectedSignals"]
+    assert "risk_context_trigger:volume_spike" in body["detectedSignals"]
+
+
+def test_analyze_accepts_manual_transcription_text_for_demo_mode() -> None:
+    client = TestClient(app)
+
+    response = client.post(
+        "/analyze",
+        json={
+            "evidenceRecordId": "manual-evidence-id",
+            "alertSessionId": "session-id",
+            "evidenceType": "AUDIO",
+            "mimeType": "audio/manual",
+            "size": 1,
+            "contentHash": "d" * 64,
+            "manualTranscriptionText": "Eu vou te matar agora.",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+
+    assert body["analysisId"] == "manual-analysis-manual-evidence-id"
+    assert body["status"] == "COMPLETED"
+    assert body["riskLevel"] == "CRITICAL"
+    assert body["shouldEscalate"] is True
+    assert body["recommendedAction"] == "ESCALATE_CONTACTS"
+    assert body["transcription"] == {
+        "text": "Eu vou te matar agora.",
+        "language": "pt",
+        "segments": [
+            {
+                "startMs": 0,
+                "endMs": 0,
+                "text": "Eu vou te matar agora.",
+                "confidence": 1,
+            },
+        ],
+    }
+    assert body["providerMetadata"] == {
+        "provider": "manual",
+        "model": "manual-transcription",
+        "modelVersion": "manual-transcription-v1",
+    }
+    assert "transcription_source:manual" in body["detectedSignals"]
+    assert "threat_signal:concrete_lethal_threat" in body["detectedSignals"]
+
+
 def test_analyze_rejects_non_audio_contract_payload() -> None:
     client = TestClient(app)
 

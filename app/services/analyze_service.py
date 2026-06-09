@@ -5,15 +5,18 @@ from app.schemas.analyze import (
     AnalysisStatus,
     AnalyzeEvidenceRequest,
     AnalyzeEvidenceResponse,
+    AudioTranscription,
     EvidenceWindow,
     RecommendedAction,
     RiskLevel,
+    TranscriptionSegment,
 )
 from app.services.acoustic_detection_service import detect_acoustic_events
 from app.services.audio_source import AudioSourceError, resolve_audio_source
 from app.services.risk_aggregation_service import aggregate_risk
 from app.services.transcription_service import (
     TranscriptionError,
+    TranscriptionResult,
     get_transcription_provider,
 )
 
@@ -27,8 +30,19 @@ class AnalyzeService:
         try:
             source = resolve_audio_source(payload)
             acoustic_result = detect_acoustic_events(source)
-            transcription_provider = get_transcription_provider()
-            transcription_result = transcription_provider.transcribe(source, payload)
+            manual_transcription_text = (payload.manual_transcription_text or "").strip()
+
+            if manual_transcription_text:
+                transcription_result = self._build_manual_transcription_result(
+                    payload,
+                    manual_transcription_text,
+                )
+            else:
+                transcription_provider = get_transcription_provider()
+                transcription_result = transcription_provider.transcribe(
+                    source,
+                    payload,
+                )
         except AudioSourceError as error:
             return self._build_failed_response(
                 payload=payload,
@@ -115,6 +129,51 @@ class AnalyzeService:
             ended_at=context.capture_ended_at,
             duration_ms=duration_ms,
         )
+
+    def _build_manual_transcription_result(
+        self,
+        payload: AnalyzeEvidenceRequest,
+        text: str,
+    ) -> TranscriptionResult:
+        duration_ms = self._get_manual_transcription_duration_ms(payload)
+        transcription = AudioTranscription(
+            text=text,
+            language="pt",
+            segments=[
+                TranscriptionSegment(
+                    start_ms=0,
+                    end_ms=duration_ms,
+                    text=text,
+                    confidence=1,
+                )
+            ],
+        )
+
+        return TranscriptionResult(
+            status=AnalysisStatus.COMPLETED,
+            transcription=transcription,
+            provider_metadata=AnalysisProviderMetadata(
+                provider="manual",
+                model="manual-transcription",
+                model_version="manual-transcription-v1",
+            ),
+            detected_signals=[
+                "transcription_completed",
+                "transcription_source:manual",
+            ],
+            confidence=0.99,
+        )
+
+    def _get_manual_transcription_duration_ms(
+        self,
+        payload: AnalyzeEvidenceRequest,
+    ) -> int:
+        evidence_window = self._get_evidence_window(payload)
+
+        if evidence_window.duration_ms is not None:
+            return evidence_window.duration_ms
+
+        return 0
 
     def _build_failed_response(
         self,

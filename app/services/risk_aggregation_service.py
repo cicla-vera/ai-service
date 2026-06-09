@@ -221,6 +221,10 @@ def _get_context_risk(capture_context: AudioCaptureContext | None) -> RiskLevel:
         "impact",
         "local_critical_candidate",
         "scream",
+    }
+    medium_triggers = {
+        "sustained_loud_audio",
+        "very_loud_audio",
         "volume_spike",
     }
     trigger_reasons = {
@@ -233,6 +237,9 @@ def _get_context_risk(capture_context: AudioCaptureContext | None) -> RiskLevel:
 
     if trigger_reasons & high_triggers:
         return RiskLevel.HIGH
+
+    if trigger_reasons & medium_triggers:
+        return RiskLevel.MEDIUM
 
     return RiskLevel.LOW
 
