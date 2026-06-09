@@ -107,6 +107,13 @@ class AnalyzeEvidenceRequest(BaseModel):
         alias="captureContext",
         description="Consent-aware capture metadata collected by the mobile app.",
     )
+    manual_transcription_text: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=20_000,
+        alias="manualTranscriptionText",
+        description="Developer-test transcription text that should be classified without audio.",
+    )
 
     @model_validator(mode="after")
     def validate_audio_contract(self) -> "AnalyzeEvidenceRequest":

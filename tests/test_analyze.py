@@ -708,7 +708,7 @@ def test_analyze_falls_back_from_deepgram_to_groq(
     assert captured_request["data"]["model"] == "whisper-large-v3-turbo"
     assert captured_request["data"]["language"] == "pt"
     assert captured_request["files"]["file"] == (
-        "evidence-id.audio",
+        "evidence-id.wav",
         audio_bytes,
         "audio/wav",
     )
